@@ -26,11 +26,17 @@ from typing import Any
 import httpx
 
 from config.account import agent_bearer_token
+from config.constants.account import (
+    INTEGRATION_IS_DEFAULT_TAG,
+    INTEGRATION_OWNER_ID_TAG,
+    INTEGRATION_OWNER_KIND_TAG,
+)
 from config.constants.billing import (
     CREDITS_HTTP_TIMEOUT_SECONDS,
     WEBAPP_URL_ENV,
 )
 from config.constants.organization import organization_id
+from integrations.credentials_api import connection_visible
 
 logger = logging.getLogger(__name__)
 
@@ -209,14 +215,17 @@ def fetch_webapp_org_integrations() -> list[dict[str, Any]] | None:
         logger.warning("[webapp-vault] non-JSON response")
         return None
 
-    return records_from_vault_payload(payload)
+    return records_from_vault_payload(payload, organization_id=org)
 
 
-def records_from_vault_payload(payload: object) -> list[dict[str, Any]] | None:
+def records_from_vault_payload(
+    payload: object, *, organization_id: str
+) -> list[dict[str, Any]] | None:
     """Parse a vault JSON body into integration records.
 
-    Shared by the silo client and the signed-in CLI client. ``None`` means the
-    body is not a successful vault response.
+    ``None`` means the body is not a successful vault response. Connections
+    owned by anyone other than ``organization_id`` (a member's personal grant)
+    are dropped: this store is shared by every member the silo serves.
     """
     if not isinstance(payload, dict) or not payload.get("success"):
         return None
@@ -232,13 +241,68 @@ def records_from_vault_payload(payload: object) -> list[dict[str, Any]] | None:
         credentials = item.get("credentials")
         if not service or not isinstance(credentials, dict):
             continue
+        owner_tags = _owner_tags(item)
+        if owner_tags is None:
+            continue
+        tags = _instance_tags(item, credentials, owner_tags=owner_tags)
+        if not connection_visible(tags, user_id=None, organization_id=organization_id):
+            continue
+        normalized_credentials = {
+            str(key): str(value) for key, value in credentials.items() if value is not None
+        }
+        name = str(item.get("name") or "default")
         records.append(
             {
                 "id": str(item.get("id") or ""),
                 "service": service,
                 "status": str(item.get("status") or "active"),
-                "name": str(item.get("name") or "default"),
-                "credentials": {str(k): str(v) for k, v in credentials.items() if v is not None},
+                "name": name,
+                "credentials": normalized_credentials,
+                "instances": [
+                    {
+                        "name": name,
+                        "tags": tags,
+                        "credentials": normalized_credentials,
+                    }
+                ],
             }
         )
     return records
+
+
+def _instance_tags(
+    item: dict[str, Any],
+    credentials: dict[object, object],
+    *,
+    owner_tags: dict[str, object],
+) -> dict[str, object]:
+    """Owner and default metadata in the v2 instance shape."""
+    tags = owner_tags
+    is_default = item.get("is_default")
+    if is_default is True or (
+        is_default is None and str(credentials.get("is_default", "")).lower() == "true"
+    ):
+        tags[INTEGRATION_IS_DEFAULT_TAG] = "true"
+    return tags
+
+
+def _owner_tags(item: dict[str, Any]) -> dict[str, object] | None:
+    """Return owner tags, preserving only absent-owner legacy records."""
+    if "owner" not in item:
+        return {}
+    owner = item["owner"]
+    if not isinstance(owner, dict):
+        return None
+    kind = owner.get("kind")
+    owner_id = owner.get("id")
+    if (
+        not isinstance(kind, str)
+        or kind not in {"user", "organization"}
+        or not isinstance(owner_id, str)
+        or not owner_id.strip()
+    ):
+        return None
+    return {
+        INTEGRATION_OWNER_KIND_TAG: kind,
+        INTEGRATION_OWNER_ID_TAG: owner_id,
+    }

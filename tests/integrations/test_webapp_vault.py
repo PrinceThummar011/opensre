@@ -15,6 +15,7 @@ from config.constants.billing import (
     USAGE_SECRET_ENV,
     WEBAPP_URL_ENV,
 )
+from integrations.catalog import classify_integrations
 
 
 class _FakeResponse:
@@ -339,3 +340,103 @@ def test_read_is_bound_to_this_silos_own_organization(monkeypatch: pytest.Monkey
     # Assert: no caller-supplied organization, and the env one is used.
     assert inspect.signature(vault.fetch_webapp_org_integrations).parameters == {}
     assert sent[0]["params"]["organizationId"] == "org_mine"
+
+
+def test_turn_time_vault_read_drops_personal_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(WEBAPP_URL_ENV, "https://app.example.com")
+    monkeypatch.setenv(USAGE_SECRET_ENV, "mt_vault")
+    monkeypatch.setenv(ORGANIZATION_ID_ENV, "org_1")
+
+    def _item(record_id: str, owner: dict[str, str]) -> dict[str, Any]:
+        return {
+            "id": record_id,
+            "service": "github",
+            "status": "active",
+            "name": record_id,
+            "owner": owner,
+            "credentials": {"auth_token": f"tok-{record_id}"},
+        }
+
+    def fake_get(_url: str, **_kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(
+            200,
+            {
+                "success": True,
+                "data": [
+                    _item("team", {"kind": "organization", "id": "org_1"}),
+                    _item("mine", {"kind": "user", "id": "user_1"}),
+                ],
+            },
+        )
+
+    monkeypatch.setattr(vault.httpx, "get", fake_get)
+
+    records = vault.fetch_webapp_org_integrations()
+
+    assert records is not None
+    assert [record["id"] for record in records] == ["team"]
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        None,
+        "organization",
+        {},
+        {"kind": "organization"},
+        {"kind": "organization", "id": " "},
+    ],
+)
+def test_turn_time_vault_read_rejects_malformed_owners(owner: object) -> None:
+    records = vault.records_from_vault_payload(
+        {
+            "success": True,
+            "data": [
+                {
+                    "id": "unsafe",
+                    "service": "github",
+                    "status": "active",
+                    "name": "default",
+                    "owner": owner,
+                    "credentials": {"auth_token": "must-not-escape"},
+                }
+            ],
+        },
+        organization_id="org_1",
+    )
+
+    assert records == []
+
+
+def test_turn_time_vault_selects_the_workspace_default() -> None:
+    def _item(record_id: str, *, is_default: bool) -> dict[str, Any]:
+        return {
+            "id": record_id,
+            "service": "github",
+            "status": "active",
+            "name": record_id,
+            "owner": {"kind": "organization", "id": "org_1"},
+            "is_default": is_default,
+            "credentials": {
+                "auth_token": f"tok-{record_id}",
+                "is_default": str(is_default).lower(),
+            },
+        }
+
+    records = vault.records_from_vault_payload(
+        {
+            "success": True,
+            "data": [
+                _item("first", is_default=False),
+                _item("second", is_default=True),
+            ],
+        },
+        organization_id="org_1",
+    )
+
+    assert records is not None
+    resolved = classify_integrations(records)
+    assert resolved["github"]["auth_token"] == "tok-second"
+    assert resolved["github"]["connection_id"] == "second"
