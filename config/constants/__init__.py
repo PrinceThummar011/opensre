@@ -533,6 +533,9 @@ if TYPE_CHECKING:
         WEB_STOP_TIMEOUT_SECONDS as WEB_STOP_TIMEOUT_SECONDS,
     )
     from config.constants.git import (
+        GIT_ALLOW_PROTOCOL_ENV as GIT_ALLOW_PROTOCOL_ENV,
+    )
+    from config.constants.git import (
         GIT_OPTIONAL_LOCKS_ENV as GIT_OPTIONAL_LOCKS_ENV,
     )
     from config.constants.git import (
@@ -555,9 +558,6 @@ if TYPE_CHECKING:
     )
     from config.constants.github import (
         GITHUB_API_BASE_URL as GITHUB_API_BASE_URL,
-    )
-    from config.constants.github import (
-        GITHUB_CLI_REQUIRED_SCOPES as GITHUB_CLI_REQUIRED_SCOPES,
     )
     from config.constants.github import (
         GITHUB_MCP_ARGS_ENV as GITHUB_MCP_ARGS_ENV,
