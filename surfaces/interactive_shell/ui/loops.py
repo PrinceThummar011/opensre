@@ -9,6 +9,7 @@ from datetime import UTC, datetime, tzinfo
 from rich.console import Console
 from rich.text import Text
 
+from infrastructure.scheduling.scheduler.local_delivery import LocalLoopMessage
 from infrastructure.scheduling.scheduler.loop_constants import LOOP_MODE_REPORT
 from infrastructure.scheduling.scheduler.loops import LoopSummary
 from infrastructure.scheduling.scheduler.types import TaskRun, TaskStatus
@@ -16,9 +17,9 @@ from infrastructure.terminal.markdown import ReplyMarkdown, UnpaddedRows
 from infrastructure.terminal.theme import BOLD_BRAND, DIM, ERROR, HIGHLIGHT, WARNING
 from surfaces.shared.terminal.components.rendering import (
     print_repl_renderable,
-    print_repl_table,
-    repl_table,
 )
+from surfaces.shared.terminal.components.time_format import format_repl_timestamp
+from surfaces.shared.terminal.tables.descriptions import description_details
 from surfaces.shared.terminal.tables.records import RecordColumn, RecordRow, RecordTable
 
 
@@ -109,12 +110,6 @@ def _finding(run: TaskRun) -> str:
     return "Report not retained"
 
 
-def _clipped(value: str, width: int, *, style: str = "") -> Text:
-    text = Text(" ".join(value.split()), style=style)
-    text.truncate(width, overflow="ellipsis")
-    return text
-
-
 def render_loops(
     console: Console,
     loops: Sequence[LoopSummary],
@@ -133,8 +128,6 @@ def render_loops(
             Text(f"ID: {loop.id}", style=DIM),
             Text(f"{', '.join(loop.channels)} · TZ: {loop.timezone}", style=DIM),
         ]
-        if loop.description:
-            details.append(Text(f"What it does: {loop.description}", style=DIM))
         run = latest.get(loop.id)
         if run is None:
             details.append(
@@ -148,9 +141,14 @@ def render_loops(
                     style=style,
                 )
             )
-            details.append(_clipped(_finding(run), 160))
-        if loop.schedule_error:
-            details.append(Text(f"Requires action: {loop.schedule_error}", style=WARNING))
+            details.extend(
+                description_details(
+                    _finding(run),
+                    width=160,
+                    style=str(style) if style in (WARNING, ERROR) else None,
+                )
+            )
+        details.extend(description_details(loop.description))
         rows.append(
             RecordRow(
                 (
@@ -213,18 +211,35 @@ def render_loop_details(
             console.print(Text(selected.error, style=ERROR))
 
     if runs:
-        table = repl_table(title="Recent runs", title_style=BOLD_BRAND)
-        table.add_column("Run", no_wrap=True)
-        table.add_column("Started", style=DIM, no_wrap=True)
-        table.add_column("Result", overflow="fold")
+        recent_rows: list[RecordRow] = []
         for run in runs:
             status, style = _status(run)
-            result = Text(f"{status} · {_finding(run)}", style=style)
-            result.truncate(100, overflow="ellipsis")
-            table.add_row(str(run.run_id), _exact_time(run.started_at), result)
-        print_repl_table(console, table)
-        console.print(
-            Text(f"/loops show {loop.id} --run <Run> — open an earlier report", style=DIM)
+            recent_rows.append(
+                RecordRow(
+                    (
+                        Text(str(run.run_id), style="bold"),
+                        Text(status, style=style),
+                        Text(_exact_time(run.started_at), style=DIM),
+                    ),
+                    description_details(
+                        _finding(run),
+                        width=100,
+                        style=str(style) if style in (WARNING, ERROR) else None,
+                    ),
+                )
+            )
+        print_repl_renderable(
+            console,
+            RecordTable(
+                "Recent runs",
+                (
+                    RecordColumn("Run", 8),
+                    RecordColumn("Result", 14),
+                    RecordColumn("Started", 32),
+                ),
+                tuple(recent_rows),
+                caption=f"/loops show {loop.id} --run <Run> — open an earlier report",
+            ),
         )
 
     console.print(Text("Configuration", style=BOLD_BRAND))
@@ -235,6 +250,7 @@ def render_loop_details(
         ("Next run", _exact_time(loop.next_run) if loop.enabled else "Paused"),
         ("Channels", ", ".join(channel.replace("_", " ") for channel in loop.channels)),
         ("Mode", loop.mode if loop.mode != LOOP_MODE_REPORT else ""),
+        ("Description", loop.description),
         ("Prompt", loop.prompt),
         ("Schedule error", loop.schedule_error),
     )
@@ -243,4 +259,35 @@ def render_loop_details(
             console.print(Text(f"{key}: {value}"))
 
 
-__all__ = ["render_loop_details", "render_loops"]
+def render_loop_messages(console: Console, messages: Sequence[LocalLoopMessage]) -> None:
+    """Keep inbox identifiers outside columns and message previews bounded."""
+    print_repl_renderable(
+        console,
+        RecordTable(
+            "Loop messages",
+            (RecordColumn("Loop"), RecordColumn("Created", 19)),
+            tuple(
+                RecordRow(
+                    (
+                        Text(message.name or message.loop_id, style="bold"),
+                        Text(
+                            format_repl_timestamp(message.created_at, style="utc").removesuffix(
+                                " UTC"
+                            ),
+                            style=DIM,
+                        ),
+                    ),
+                    (
+                        Text(f"Message ID: {message.message_id}", style=DIM),
+                        Text(f"Loop ID: {message.loop_id}", style=DIM),
+                        *description_details(message.message, width=120),
+                    ),
+                )
+                for message in messages
+            ),
+            subtitle="Created times: UTC",
+        ),
+    )
+
+
+__all__ = ["render_loop_details", "render_loop_messages", "render_loops"]
